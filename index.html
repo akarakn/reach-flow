@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>ReachLive Trafikli - Konum İçinde Garantili</title>
+  <style>
+    #map {
+      height: 90vh;
+      width: 100%;
+    }
+    #controls {
+      padding: 10px;
+      background: #fff;
+    }
+    #refreshButton {
+      margin-top: 10px;
+    }
+  </style>
+</head>
+<body>
+
+<div id="controls">
+  <label for="apiKeyInput">Google API Key:</label>
+  <input type="text" id="apiKeyInput" placeholder="API Key Girin" style="width: 300px;">
+  <button id="loadMapButton">Load Map</button>
+
+  <hr>
+
+  <label for="minutesRange">Dakika: <span id="minutesLabel">30</span></label>
+  <input type="range" id="minutesRange" min="5" max="60" value="30" step="1">
+
+  <br>
+
+  <label for="startDistanceRange">Başlangıç Mesafesi (km): <span id="startDistanceLabel">1.0</span></label>
+  <input type="range" id="startDistanceRange" min="0.25" max="5" value="1" step="0.25">
+
+  <br>
+
+  <label for="attemptsRange">Deneme Sayısı: <span id="attemptsLabel">3</span></label>
+  <input type="range" id="attemptsRange" min="1" max="30" value="3" step="1">
+
+  <br>
+
+  <label for="stepsRange">Işın Sayısı: <span id="stepsLabel">24</span></label>
+  <input type="range" id="stepsRange" min="12" max="72" value="24" step="12">
+
+  <br>
+
+  <div id="requestInfo" style="margin-top: 10px; color: red; font-weight: bold;">
+    Worst Case: 72 request<br>
+    Free Tier Limit: 10.000 Request / month
+  </div>
+
+  <button id="refreshButton" disabled>Reach</button>
+</div>
+
+<div id="map"></div>
+
+<script>
+let map;
+let origin;
+let polygon;
+let directionsService;
+let markers = [];
+
+let currentMinutes = 30;
+let startDistanceKm = 1.0;
+let attemptsCount = 3;
+let stepsCount = 24;
+
+document.getElementById('loadMapButton').addEventListener('click', function() {
+  const apiKey = document.getElementById('apiKeyInput').value.trim();
+  if (!apiKey) {
+    alert("Lütfen API Key girin!");
+    return;
+  }
+  const script = document.createElement('script');
+  script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=geometry&callback=initMap`;
+  script.async = true;
+  document.head.appendChild(script);
+
+  document.getElementById('refreshButton').disabled = false;
+});
+
+function updateRequestInfo() {
+  const worstCaseRequests = stepsCount * attemptsCount;
+  document.getElementById('requestInfo').innerHTML = `
+    Worst Case: ${worstCaseRequests} request<br>
+    <span style="color: red;">Free Tier Limit: 10.000 request / month</span>
+  `;
+}
+
+document.getElementById('minutesRange').addEventListener('input', function() {
+  document.getElementById('minutesLabel').textContent = this.value;
+  currentMinutes = parseInt(this.value);
+  updateRequestInfo();
+});
+document.getElementById('startDistanceRange').addEventListener('input', function() {
+  document.getElementById('startDistanceLabel').textContent = this.value;
+  startDistanceKm = parseFloat(this.value);
+  updateRequestInfo();
+});
+document.getElementById('attemptsRange').addEventListener('input', function() {
+  document.getElementById('attemptsLabel').textContent = this.value;
+  attemptsCount = parseInt(this.value);
+  updateRequestInfo();
+});
+document.getElementById('stepsRange').addEventListener('input', function() {
+  document.getElementById('stepsLabel').textContent = this.value;
+  stepsCount = parseInt(this.value);
+  updateRequestInfo();
+});
+
+document.getElementById('refreshButton').addEventListener('click', function() {
+  drawIsochrone(currentMinutes);
+});
+
+function initMap() {
+  if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(position => {
+      origin = { lat: position.coords.latitude, lng: position.coords.longitude };
+      map = new google.maps.Map(document.getElementById('map'), {
+        center: origin,
+        zoom: 13
+      });
+
+      new google.maps.Marker({
+        position: origin,
+        map: map,
+        title: "Başlangıç Noktası",
+        icon: {
+          path: google.maps.SymbolPath.CIRCLE,
+          scale: 6,
+          fillColor: "#0000FF",
+          fillOpacity: 1,
+          strokeWeight: 2,
+          strokeColor: "#ffffff"
+        }
+      });
+
+      directionsService = new google.maps.DirectionsService();
+    });
+  } else {
+    alert("Konum servisi desteklenmiyor.");
+  }
+}
+
+async function drawIsochrone(minutes) {
+  if (polygon) {
+    polygon.setMap(null);
+  }
+  markers.forEach(m => m.setMap(null));
+  markers = [];
+
+  console.clear();
+  console.log(`🚀 Isochrone hesaplanıyor: ${minutes} dakika, ${stepsCount} ışın`);
+
+  const destinations = [];
+  const distances = [];
+  for (let i = 1; i <= attemptsCount; i++) {
+    distances.push(startDistanceKm * i);
+  }
+  distances.reverse();
+
+  const promises = [];
+  for (let i = 0; i < stepsCount; i++) {
+    const angle = (i / stepsCount) * 2 * Math.PI;
+    promises.push(getDirectionsSmart(origin, angle, distances, minutes, i));
+  }
+
+  const results = await Promise.all(promises);
+
+  results.forEach(res => {
+    if (res && res.dest) {
+      destinations.push(res.dest);
+      createMarker(res.dest, res.minutes);
+    }
+  });
+
+  if (destinations.length > 2) {
+    const smoothPath = smoothCurve(destinations);
+    smoothPath.push(origin); // En son origin noktasını da kapatalım!
+    polygon = new google.maps.Polygon({
+      paths: smoothPath,
+      strokeColor: "#0000FF",
+      strokeOpacity: 0.8,
+      strokeWeight: 2,
+      fillColor: "#0000FF",
+      fillOpacity: 0.35,
+    });
+    polygon.setMap(map);
+  }
+}
+
+async function getDirectionsSmart(start, angle, distances, minutes, rayIndex) {
+  for (let [idx, d] of distances.entries()) {
+    const dx = d * Math.cos(angle) / 111;
+    const dy = d * Math.sin(angle) / (111 * Math.cos(start.lat * Math.PI / 180));
+    const dest = { lat: start.lat + dx, lng: start.lng + dy };
+
+    console.log(`  ➡️ [Işın ${rayIndex + 1}] Deneme ${idx + 1}: ${d.toFixed(2)} km`);
+
+    const result = await getDirections(start, dest);
+
+    const isSuccess = result && result.duration_in_traffic && result.duration_in_traffic <= minutes * 60;
+
+    if (isSuccess) {
+      return { dest: dest, minutes: (result.duration_in_traffic/60).toFixed(1) };
+    }
+  }
+  return null;
+}
+
+function getDirections(start, end) {
+  return new Promise((resolve) => {
+    directionsService.route({
+      origin: start,
+      destination: end,
+      travelMode: google.maps.TravelMode.DRIVING,
+      drivingOptions: {
+        departureTime: new Date(Date.now() + 5 * 60 * 1000)
+      }
+    }, (result, status) => {
+      if (status === 'OK') {
+        const duration_in_traffic = result.routes[0].legs[0].duration_in_traffic.value;
+        resolve({ duration_in_traffic });
+      } else {
+        resolve(null);
+      }
+    });
+  });
+}
+
+function createMarker(position, minutes) {
+  const marker = new google.maps.Marker({
+    position: position,
+    map: map,
+    icon: {
+      path: google.maps.SymbolPath.CIRCLE,
+      scale: 4,
+      fillColor: "#00FF00",
+      fillOpacity: 1,
+      strokeWeight: 1,
+    }
+  });
+
+  const infowindow = new google.maps.InfoWindow({
+    content: `<b>${minutes} dakika</b>`
+  });
+
+  marker.addListener('click', function() {
+    infowindow.open(map, marker);
+  });
+
+  markers.push(marker);
+}
+
+// Smart Spline Curve
+function smoothCurve(points) {
+  const smooth = [];
+  for (let i = 0; i < points.length; i++) {
+    const p1 = points[i];
+    const p2 = points[(i + 1) % points.length];
+    smooth.push(p1);
+    smooth.push({
+      lat: (p1.lat + p2.lat) / 2,
+      lng: (p1.lng + p2.lng) / 2,
+    });
+  }
+  return smooth;
+}
+</script>
+
+</body>
+</html>
