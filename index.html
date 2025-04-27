@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>ReachLive Trafikli - Konum İçinde Garantili</title>
+  <title>ReachLive Trafikli - Gerçek Polygon</title>
   <style>
     #map {
       height: 90vh;
@@ -177,10 +177,11 @@ async function drawIsochrone(minutes) {
   });
 
   if (destinations.length > 2) {
-    const smoothPath = smoothCurve(destinations);
-    smoothPath.push(origin); // En son origin noktasını da kapatalım!
+    const polygonPoints = [...destinations];
+    polygonPoints.push(origin); // Başlangıç konumu da ekleniyor
+
     polygon = new google.maps.Polygon({
-      paths: smoothPath,
+      paths: polygonPoints,
       strokeColor: "#0000FF",
       strokeOpacity: 0.8,
       strokeWeight: 2,
@@ -252,21 +253,6 @@ function createMarker(position, minutes) {
   });
 
   markers.push(marker);
-}
-
-// Smart Spline Curve
-function smoothCurve(points) {
-  const smooth = [];
-  for (let i = 0; i < points.length; i++) {
-    const p1 = points[i];
-    const p2 = points[(i + 1) % points.length];
-    smooth.push(p1);
-    smooth.push({
-      lat: (p1.lat + p2.lat) / 2,
-      lng: (p1.lng + p2.lng) / 2,
-    });
-  }
-  return smooth;
 }
 </script>
 
